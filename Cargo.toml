@@ -1,6 +1,32 @@
 [package]
 name = "foundry"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+description = "Fast, simple, and predictable local development environments"
+authors = ["Ivan"]
+license = "MIT"
 
 [dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Docker API
+bollard = "0.18"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Configuration
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+futures = "0.3"
