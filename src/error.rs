@@ -11,6 +11,9 @@ pub enum FoundryError {
     #[error("Docker error: {0}")]
     Docker(#[from] bollard::errors::Error),
 
+    #[error("Docker operation failed: {0}")]
+    DockerError(String),
+
     #[error("Service not found: {0}")]
     ServiceNotFound(String),
 

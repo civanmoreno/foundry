@@ -1,7 +1,15 @@
 use bollard::Docker;
+use bollard::container::{
+    CreateContainerOptions, ListContainersOptions, RemoveContainerOptions,
+    StartContainerOptions, StopContainerOptions,
+};
+use bollard::image::CreateImageOptions;
+use bollard::models::HostConfig;
+use futures::StreamExt;
 use std::collections::HashMap;
+use std::default::Default;
 
-use crate::config::Config;
+use crate::config::{Config, Service};
 use crate::error::{FoundryError, Result};
 
 /// Docker label prefix for Foundry-managed resources
@@ -63,40 +71,327 @@ impl DockerClient {
     }
 
     /// Get the underlying Bollard client
+    #[allow(dead_code)]
     pub fn inner(&self) -> &Docker {
         &self.client
     }
 
     /// Check if Docker is available
+    #[allow(dead_code)]
     pub async fn is_available(&self) -> bool {
         self.client.ping().await.is_ok()
     }
 
     /// Start all services defined in the configuration
-    pub async fn up(&self, _config: &Config, _service: Option<&str>) -> Result<()> {
-        // TODO: Implement service startup
-        tracing::info!("Starting services...");
+    pub async fn up(&self, config: &Config, service_filter: Option<&str>) -> Result<()> {
+        tracing::info!("Starting services for project '{}'", config.name);
+        
+        // Get normalized services
+        let all_services = config.get_services()?;
+        
+        // Filter services if requested
+        let services_to_start: Vec<&Service> = if let Some(filter) = service_filter {
+            all_services.iter().filter(|s| s.name == filter).collect()
+        } else {
+            all_services.iter().collect()
+        };
+
+        if services_to_start.is_empty() {
+            return Err(FoundryError::ConfigNotFound(format!(
+                "No services found{}",
+                service_filter.map(|f| format!(" matching '{}'", f)).unwrap_or_default()
+            )));
+        }
+
+        // Create and start containers
+        for service in services_to_start {
+            let container_name = format!("{}-{}", config.name, service.name);
+
+            // Check if container already exists
+            if let Some(state) = self.container_state(&container_name).await {
+                if state == "running" {
+                    println!("✓ {} already running", service.name);
+                    continue;
+                } else {
+                    // Container exists but stopped, start it
+                    println!("Starting {}...", service.name);
+                    self.client
+                        .start_container(&container_name, None::<StartContainerOptions<String>>)
+                        .await?;
+
+                    let port_info = service
+                        .port
+                        .map(|p| format!(" (port {})", p))
+                        .unwrap_or_default();
+                    println!("✓ {} started{}", service.name, port_info);
+                    continue;
+                }
+            }
+
+            // Container doesn't exist, create it
+            println!("Starting {}...", service.name);
+
+            // Pull image if not exists
+            if !self.image_exists(&service.image).await {
+                self.pull_image(&service.image).await?;
+            }
+
+            let labels = Labels::for_service(&config.name, &service.name, "development");
+
+            // Build port bindings
+            let (port_bindings, exposed_ports) = self.build_port_config(service);
+
+            // Build host config with port bindings
+            let host_config = HostConfig {
+                port_bindings: Some(port_bindings),
+                ..Default::default()
+            };
+
+            // Build environment variables
+            let env_vars: Vec<String> = service
+                .env
+                .iter()
+                .map(|(k, v)| format!("{}={}", k, v))
+                .collect();
+
+            let config_opts = CreateContainerOptions {
+                name: container_name.clone(),
+                platform: None,
+            };
+
+            // Build container spec
+            let container_spec = bollard::container::Config {
+                image: Some(service.image.clone()),
+                labels: Some(labels),
+                exposed_ports: Some(exposed_ports),
+                host_config: Some(host_config),
+                env: if env_vars.is_empty() {
+                    None
+                } else {
+                    Some(env_vars)
+                },
+                ..Default::default()
+            };
+
+            // Create the container
+            let create_response = self
+                .client
+                .create_container(Some(config_opts), container_spec)
+                .await;
+
+            match create_response {
+                Ok(response) => {
+                    // Start the container
+                    self.client
+                        .start_container(&response.id, None::<StartContainerOptions<String>>)
+                        .await?;
+
+                    let port_info = service
+                        .port
+                        .map(|p| format!(" (port {})", p))
+                        .unwrap_or_default();
+                    println!("✓ {} started{}", service.name, port_info);
+                }
+                Err(e) => {
+                    return Err(FoundryError::DockerError(format!(
+                        "Failed to create container {}: {}",
+                        service.name, e
+                    )));
+                }
+            }
+        }
+
         Ok(())
     }
 
+    /// Build port configuration for a service
+    fn build_port_config(
+        &self,
+        service: &Service,
+    ) -> (
+        HashMap<String, Option<Vec<bollard::models::PortBinding>>>,
+        HashMap<String, HashMap<(), ()>>,
+    ) {
+        let mut port_bindings = HashMap::new();
+        let mut exposed_ports = HashMap::new();
+
+        if let Some(port) = service.port {
+            let container_port = format!("{}/tcp", port);
+            port_bindings.insert(
+                container_port.clone(),
+                Some(vec![bollard::models::PortBinding {
+                    host_ip: Some("0.0.0.0".to_string()),
+                    host_port: Some(port.to_string()),
+                }]),
+            );
+            exposed_ports.insert(container_port, HashMap::new());
+        }
+
+        (port_bindings, exposed_ports)
+    }
+
+    /// Pull a Docker image
+    async fn pull_image(&self, image: &str) -> Result<()> {
+        println!("  Pulling {}...", image);
+
+        let options = CreateImageOptions {
+            from_image: image,
+            ..Default::default()
+        };
+
+        let mut stream = self.client.create_image(Some(options), None, None);
+
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(_) => {}
+                Err(e) => {
+                    return Err(FoundryError::DockerError(format!(
+                        "Failed to pull image {}: {}",
+                        image, e
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Check if image exists locally
+    async fn image_exists(&self, image: &str) -> bool {
+        self.client.inspect_image(image).await.is_ok()
+    }
+
+    /// Check if container exists and return its state
+    async fn container_state(&self, name: &str) -> Option<String> {
+        match self.client.inspect_container(name, None).await {
+            Ok(info) => info.state.and_then(|s| s.status.map(|st| st.to_string())),
+            Err(_) => None,
+        }
+    }
+
+
     /// Stop all running services
-    pub async fn down(&self, _config: &Config, _service: Option<&str>) -> Result<()> {
-        // TODO: Implement service shutdown
-        tracing::info!("Stopping services...");
+    pub async fn down(&self, config: &Config, service_filter: Option<&str>) -> Result<()> {
+        let containers = self.list_project_containers(&config.name).await?;
+
+        if containers.is_empty() {
+            println!("No running services found");
+            return Ok(());
+        }
+
+        for container in containers {
+            let name = container
+                .names
+                .as_ref()
+                .and_then(|n| n.first())
+                .map(|n| n.trim_start_matches('/'))
+                .unwrap_or("unknown");
+
+            // Filter by service if specified
+            if let Some(filter) = service_filter {
+                let service_name = name.strip_prefix(&format!("{}-", config.name)).unwrap_or(name);
+                if service_name != filter {
+                    continue;
+                }
+            }
+
+            if let Some(id) = &container.id {
+                println!("Stopping {}...", name);
+                self.client
+                    .stop_container(id, Some(StopContainerOptions { t: 10 }))
+                    .await
+                    .ok(); // Ignore error if already stopped
+                println!("✓ {} stopped", name);
+            }
+        }
+
         Ok(())
     }
 
     /// Remove all containers, networks, and optionally volumes
-    pub async fn clean(&self, _config: &Config, _remove_volumes: bool) -> Result<()> {
-        // TODO: Implement cleanup
-        tracing::info!("Cleaning up resources...");
+    pub async fn clean(&self, config: &Config, _remove_volumes: bool) -> Result<()> {
+        let containers = self.list_project_containers(&config.name).await?;
+
+        if containers.is_empty() {
+            println!("No containers to clean");
+            return Ok(());
+        }
+
+        for container in containers {
+            let name = container
+                .names
+                .as_ref()
+                .and_then(|n| n.first())
+                .map(|n| n.trim_start_matches('/'))
+                .unwrap_or("unknown");
+
+            if let Some(id) = &container.id {
+                println!("Removing {}...", name);
+                self.client
+                    .remove_container(
+                        id,
+                        Some(RemoveContainerOptions {
+                            force: true,
+                            ..Default::default()
+                        }),
+                    )
+                    .await?;
+                println!("✓ {} removed", name);
+            }
+        }
+
         Ok(())
     }
 
+    /// List all containers for a project
+    async fn list_project_containers(
+        &self,
+        project: &str,
+    ) -> Result<Vec<bollard::models::ContainerSummary>> {
+        let mut filters = HashMap::new();
+        filters.insert(
+            "label".to_string(),
+            vec![format!("foundry.project={}", project)],
+        );
+
+        let options = ListContainersOptions {
+            all: true,
+            filters,
+            ..Default::default()
+        };
+
+        let containers = self.client.list_containers(Some(options)).await?;
+        Ok(containers)
+    }
+
     /// Show status of all services
-    pub async fn status(&self, _config: &Config) -> Result<()> {
-        // TODO: Implement status display
-        tracing::info!("Checking status...");
+    pub async fn status(&self, config: &Config) -> Result<()> {
+        let containers = self.list_project_containers(&config.name).await?;
+
+        if containers.is_empty() {
+            println!("No services running for project '{}'", config.name);
+            return Ok(());
+        }
+
+        println!("\nProject: {}\n", config.name);
+        println!("{:<20} {:<25} {:<15}", "SERVICE", "IMAGE", "STATUS");
+        println!("{}", "-".repeat(60));
+
+        for container in containers {
+            let name = container
+                .names
+                .as_ref()
+                .and_then(|n| n.first())
+                .map(|n| n.trim_start_matches('/'))
+                .map(|n| n.strip_prefix(&format!("{}-", config.name)).unwrap_or(n))
+                .unwrap_or("unknown");
+
+            let image = container.image.as_deref().unwrap_or("unknown");
+            let state = container.state.as_deref().unwrap_or("unknown");
+
+            println!("{:<20} {:<25} {:<15}", name, image, state);
+        }
+
         Ok(())
     }
 }

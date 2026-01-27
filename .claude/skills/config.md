@@ -3,66 +3,100 @@
 ## Location
 [src/config/mod.rs](src/config/mod.rs)
 
-## Purpose
-Handles loading, parsing, and saving the `foundry.yaml` configuration file.
+## Philosophy
+- Simple por default, personalizable cuando se necesita
+- Formato corto para casos comunes
+- Formato largo para configuración avanzada
+- Env vars con defaults sensatos para DBs
 
 ## Configuration Schema
 
+### Formato Corto
 ```yaml
-name: my-app                    # Project name (required)
-
-services:                       # Service definitions
-  app:
-    image: node:20              # Docker image (required)
-    command: npm run dev        # Override default command
-    workdir: /app               # Working directory
-    ports:
-      - "3000:3000"             # Port mappings (host:container)
-    env:
-      NODE_ENV: development     # Environment variables
-    volumes:
-      - "./src:/app/src"        # Volume mounts
-    depends_on:
-      - db                      # Service dependencies
+name: my-app
+redis: 7
+node: 20
 ```
 
-## Key Structures
+### Formato Largo
+```yaml
+name: my-app
+
+mysql:
+  version: 8.0
+  port: 3306
+  image: mysql:8.0          # opcional
+  env:                      # opcional
+    MYSQL_DATABASE: mydb
+    MYSQL_USER: admin
+```
+
+## Imágenes Default
+
+| Servicio | Imagen Default |
+|----------|----------------|
+| node | `node:{version}-alpine` |
+| redis | `redis:{version}-alpine` |
+| php | `serversideup/php:{version}-fpm` |
+| mysql | `mysql:{version}` |
+| postgres | `postgres:{version}` |
+| mongodb | `mongo:{version}` |
+
+## Env Vars Default
+
+Foundry agrega env vars automáticamente para DBs:
+
+| Servicio | Variables Default |
+|----------|-------------------|
+| mysql | `MYSQL_ROOT_PASSWORD=secret`, `MYSQL_DATABASE=app` |
+| postgres | `POSTGRES_PASSWORD=secret`, `POSTGRES_DB=app` |
+| mongodb | `MONGO_INITDB_ROOT_USERNAME=root`, `MONGO_INITDB_ROOT_PASSWORD=secret` |
+
+Puedes sobrescribir cualquier variable en el config:
+```yaml
+mysql:
+  version: 8.0
+  env:
+    MYSQL_ROOT_PASSWORD: my_secure_password
+    MYSQL_DATABASE: production_db
+```
+
+## Rust Structures
 
 ```rust
-pub struct Config {
-    pub name: String,
-    pub services: HashMap<String, Service>,
+#[serde(untagged)]
+pub enum ServiceSpec {
+    ShortNum(u32),           // redis: 7
+    ShortStr(String),        // node: "20"
+    Long(ServiceConfig),     // mysql: { version: 8.0, port: 3306 }
+}
+
+pub struct ServiceConfig {
+    pub version: Option<serde_yaml::Value>,
+    pub port: Option<u16>,
+    pub image: Option<String>,
+    pub env: HashMap<String, String>,
 }
 
 pub struct Service {
+    pub name: String,
     pub image: String,
-    pub command: Option<String>,
-    pub workdir: Option<String>,
-    pub ports: Vec<String>,
+    pub version: String,
+    pub port: Option<u16>,
     pub env: HashMap<String, String>,
-    pub volumes: Vec<String>,
-    pub depends_on: Vec<String>,
 }
 ```
 
 ## API
 
 ```rust
-// Load from current directory
 let config = Config::load()?;
+let services = config.get_services()?;
 
-// Load from specific path
-let config = Config::load_from("path/to/foundry.yaml")?;
-
-// Create default config
-let config = Config::default_config("my-project");
-
-// Save to file
-config.save_to("foundry.yaml")?;
+for service in services {
+    println!("{}: {} (port {:?})", service.name, service.image, service.port);
+    for (k, v) in &service.env {
+        println!("  {}={}", k, v);
+    }
+}
 ```
-
-## Guidelines
-- Use Serde for serialization/deserialization
-- All optional fields should have sensible defaults
-- Validate configuration before use
-- Keep close to Docker concepts (no magic behavior)
