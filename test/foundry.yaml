@@ -1,0 +1,9 @@
+name: my-app
+
+# Formato corto - usa defaults
+redis: 7
+
+# Formato largo - personalizado
+mysql:
+  version: 8.0
+  port: 3306

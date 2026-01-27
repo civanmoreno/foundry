@@ -6,78 +6,72 @@
 ## Purpose
 Handles all Docker interactions using Bollard (native Docker API client for Rust).
 
+## Commands
+
+| Command | Status | Description |
+|---------|--------|-------------|
+| `up` | ✅ | Pull images, create/restart containers |
+| `down` | ✅ | Stop running containers |
+| `clean` | ✅ | Remove containers |
+| `status` | ✅ | List containers and their state |
+
+## Behavior
+
+### `foundry up`
+1. Si contenedor existe y está **running** → skip
+2. Si contenedor existe y está **stopped** → restart
+3. Si contenedor no existe → pull image + create + start
+
+### `foundry down`
+- Detiene contenedores (no los elimina)
+- Contenedores quedan en estado "exited"
+
+### `foundry clean`
+- Elimina contenedores (force)
+- Después de clean, `up` crea nuevos contenedores
+
 ## Docker Labels
 
-Foundry uses labels to track managed resources (no internal state/daemon):
-
 ```
-foundry.project = my-app      # Project identifier
-foundry.service = app         # Service name
-foundry.env     = local|test  # Environment (local or test)
-foundry.managed = true        # Marks resource as Foundry-managed
+foundry.project = my-app
+foundry.service = mysql
+foundry.env     = development
+foundry.managed = true
 ```
 
-## Key Structures
+## Container Naming
+
+```
+{project_name}-{service_name}
+```
+Example: `my-app-mysql`, `my-app-redis`
+
+## Key Functions
 
 ```rust
-pub struct DockerClient {
-    client: Docker,  // Bollard Docker client
-}
+// Check container state
+async fn container_state(&self, name: &str) -> Option<String>
 
-pub struct Labels;  // Helper for building label sets
+// Check if image exists locally
+async fn image_exists(&self, image: &str) -> bool
+
+// Pull image from registry
+async fn pull_image(&self, image: &str) -> Result<()>
+
+// List containers by project label
+async fn list_project_containers(&self, project: &str) -> Result<Vec<ContainerSummary>>
 ```
 
-## API
-
-```rust
-// Create client (verifies Docker is available)
-let docker = DockerClient::new().await?;
-
-// Check Docker availability
-let available = docker.is_available().await;
-
-// Operations
-docker.up(&config, Some("service_name")).await?;
-docker.down(&config, None).await?;
-docker.clean(&config, remove_volumes).await?;
-docker.status(&config).await?;
-```
-
-## Labels Helper
-
-```rust
-// Build labels for a service
-let labels = Labels::for_service("my-app", "web", "local");
-// Returns: HashMap with foundry.project, foundry.service, foundry.env, foundry.managed
-```
-
-## Bollard Patterns
+## Bollard Imports
 
 ```rust
 use bollard::Docker;
-use bollard::container::{CreateContainerOptions, Config as ContainerConfig};
-use bollard::network::CreateNetworkOptions;
-
-// Connect to Docker
-let docker = Docker::connect_with_local_defaults()?;
-
-// Create container
-let options = CreateContainerOptions { name: "my-container", .. };
-let config = ContainerConfig { image: Some("nginx"), .. };
-docker.create_container(Some(options), config).await?;
-
-// Start container
-docker.start_container("my-container", None).await?;
-
-// List containers with label filter
-let filters = HashMap::from([("label", vec!["foundry.managed=true"])]);
-let options = ListContainersOptions { filters, .. };
-let containers = docker.list_containers(Some(options)).await?;
+use bollard::container::{
+    CreateContainerOptions, ListContainersOptions,
+    RemoveContainerOptions, StartContainerOptions,
+    StopContainerOptions,
+};
+use bollard::image::CreateImageOptions;
+use bollard::models::HostConfig;
+use futures::StreamExt;
 ```
-
-## Guidelines
-- Always use labels to track resources
-- Check Docker availability before operations
-- Use async/await for all Docker operations
-- Handle errors gracefully with meaningful messages
-- Clean up resources in reverse order of creation
