@@ -33,10 +33,23 @@ mysql:
 
 ## Root Path (Volume Mount)
 
+### Global Root
+Define el directorio host a montar en todos los servicios:
+```yaml
+name: my-app
+root: ./public    # relativo al foundry.yaml
+```
+
+Soporta paths absolutos y relativos:
+- `root: ./public` → resuelve a `/path/to/project/public`
+- `root: /var/www/html` → usa el path absoluto
+- Sin `root` → usa el directorio actual (donde está foundry.yaml)
+
+### Destinos por Servicio
 Foundry monta automáticamente el directorio del proyecto en servicios que lo necesitan:
 
-| Servicio | Root Default |
-|----------|--------------|
+| Servicio | Destino en Container |
+|----------|---------------------|
 | php | `/var/www/html` |
 | nginx | `/usr/share/nginx/html` |
 | node | `/app` |
@@ -44,11 +57,12 @@ Foundry monta automáticamente el directorio del proyecto en servicios que lo ne
 | ruby | `/app` |
 | golang | `/app` |
 
-Custom root:
+### Custom Root por Servicio
+Puedes cambiar el destino dentro del container:
 ```yaml
 php:
   version: 8.3
-  root: /custom/path
+  root: /custom/path    # destino en el container
 ```
 
 ## Imágenes Oficiales Default
@@ -88,9 +102,16 @@ mysql:
 ## Rust Structures
 
 ```rust
+pub struct Config {
+    pub name: String,
+    pub root: Option<String>,    // global root path
+    pub services: HashMap<String, ServiceSpec>,
+}
+
 #[serde(untagged)]
 pub enum ServiceSpec {
     ShortNum(u32),           // redis: 7
+    ShortFloat(f64),         // php: 8.3
     ShortStr(String),        // node: "20"
     Long(ServiceConfig),     // mysql: { version: 8.0, port: 3306 }
 }
@@ -100,6 +121,7 @@ pub struct ServiceConfig {
     pub port: Option<u16>,
     pub image: Option<String>,
     pub env: HashMap<String, String>,
+    pub root: Option<String>,    // container destination path
 }
 
 pub struct Service {
@@ -108,6 +130,7 @@ pub struct Service {
     pub version: String,
     pub port: Option<u16>,
     pub env: HashMap<String, String>,
+    pub root: Option<String>,    // container destination path
 }
 ```
 

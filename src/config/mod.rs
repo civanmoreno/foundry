@@ -36,6 +36,10 @@ pub struct Config {
     /// Project name (used for labeling Docker resources)
     pub name: String,
 
+    /// Root directory to mount in containers (defaults to current directory)
+    #[serde(default)]
+    pub root: Option<String>,
+
     /// Services defined in the project (supports both short and long format)
     #[serde(default, flatten)]
     pub services: HashMap<String, ServiceSpec>,
@@ -175,6 +179,7 @@ impl Config {
     pub fn default_config(name: &str) -> Self {
         Config {
             name: name.to_string(),
+            root: None,
             services: HashMap::new(),
         }
     }

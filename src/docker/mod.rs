@@ -141,12 +141,25 @@ impl DockerClient {
             // Build port bindings
             let (port_bindings, exposed_ports) = self.build_port_config(service);
 
-            // Build volume bindings if root is specified
-            let binds = if let Some(ref root_path) = service.root {
-                let cwd = std::env::current_dir()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|_| ".".to_string());
-                Some(vec![format!("{}:{}", cwd, root_path)])
+            // Build volume bindings if service has a root path (container destination)
+            let binds = if let Some(ref container_path) = service.root {
+                // Get current working directory
+                let cwd = std::env::current_dir().unwrap_or_default();
+
+                // Use config.root as source, or current directory if not specified
+                let host_path = match &config.root {
+                    Some(root) => {
+                        // Resolve relative path to absolute
+                        let path = std::path::Path::new(root);
+                        if path.is_absolute() {
+                            root.clone()
+                        } else {
+                            cwd.join(path).to_string_lossy().to_string()
+                        }
+                    }
+                    None => cwd.to_string_lossy().to_string(),
+                };
+                Some(vec![format!("{}:{}", host_path, container_path)])
             } else {
                 None
             };
