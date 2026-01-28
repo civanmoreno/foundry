@@ -10,6 +10,7 @@ use crate::error::{FoundryError, Result};
 pub enum ServiceSpec {
     // Short format: just a version string or number
     ShortNum(u32),
+    ShortFloat(f64),
     ShortStr(String),
     // Long format: with additional configuration
     Long(ServiceConfig),
@@ -25,6 +26,10 @@ pub struct ServiceConfig {
     pub image: Option<String>,
     #[serde(default)]
     pub env: HashMap<String, String>,
+    #[serde(default)]
+    pub root: Option<String>,
+    #[serde(default)]
+    pub extensions: Vec<String>,
 }
 
 /// Main configuration structure representing foundry.yaml
@@ -32,6 +37,10 @@ pub struct ServiceConfig {
 pub struct Config {
     /// Project name (used for labeling Docker resources)
     pub name: String,
+
+    /// Root directory to mount in containers (defaults to current directory)
+    #[serde(default)]
+    pub root: Option<String>,
 
     /// Services defined in the project (supports both short and long format)
     #[serde(default, flatten)]
@@ -47,6 +56,8 @@ pub struct Service {
     pub version: String,
     pub port: Option<u16>,
     pub env: HashMap<String, String>,
+    pub root: Option<String>,
+    pub extensions: Vec<String>,
 }
 
 impl Config {
@@ -81,9 +92,10 @@ impl Config {
                 continue;
             }
 
-            let (version, port, custom_image, mut env) = match spec {
-                ServiceSpec::ShortNum(v) => (v.to_string(), None, None, HashMap::new()),
-                ServiceSpec::ShortStr(v) => (v.clone(), None, None, HashMap::new()),
+            let (version, port, custom_image, mut env, custom_root, extensions) = match spec {
+                ServiceSpec::ShortNum(v) => (v.to_string(), None, None, HashMap::new(), None, Vec::new()),
+                ServiceSpec::ShortFloat(v) => (v.to_string(), None, None, HashMap::new(), None, Vec::new()),
+                ServiceSpec::ShortStr(v) => (v.clone(), None, None, HashMap::new(), None, Vec::new()),
                 ServiceSpec::Long(config) => {
                     let ver = config
                         .version
@@ -94,7 +106,14 @@ impl Config {
                             _ => "latest".to_string(),
                         })
                         .unwrap_or_else(|| "latest".to_string());
-                    (ver, config.port, config.image.clone(), config.env.clone())
+                    (
+                        ver,
+                        config.port,
+                        config.image.clone(),
+                        config.env.clone(),
+                        config.root.clone(),
+                        config.extensions.clone(),
+                    )
                 }
             };
 
@@ -121,15 +140,30 @@ impl Config {
                 _ => {}
             }
 
-            // Map service names to default Docker images
+            // Map service names to default Docker images (official images)
             let image = custom_image.unwrap_or_else(|| match name.as_str() {
                 "node" => format!("node:{}-alpine", version),
                 "redis" => format!("redis:{}-alpine", version),
-                "php" => format!("serversideup/php:{}-fpm", version),
+                "php" => format!("php:{}-fpm-alpine", version),
                 "mysql" => format!("mysql:{}", version),
-                "postgres" => format!("postgres:{}", version),
+                "postgres" => format!("postgres:{}-alpine", version),
                 "mongodb" => format!("mongo:{}", version),
+                "nginx" => format!("nginx:{}-alpine", version),
+                "python" => format!("python:{}-slim", version),
+                "ruby" => format!("ruby:{}-slim", version),
+                "golang" => format!("golang:{}-alpine", version),
                 _ => format!("{}:{}", name, version),
+            });
+
+            // Default root paths for services that need project files
+            let root = custom_root.or_else(|| match name.as_str() {
+                "php" => Some("/var/www/html".to_string()),
+                "nginx" => Some("/usr/share/nginx/html".to_string()),
+                "node" => Some("/app".to_string()),
+                "python" => Some("/app".to_string()),
+                "ruby" => Some("/app".to_string()),
+                "golang" => Some("/app".to_string()),
+                _ => None,
             });
 
             services.push(Service {
@@ -138,6 +172,8 @@ impl Config {
                 version,
                 port,
                 env,
+                root,
+                extensions,
             });
         }
 
@@ -148,6 +184,7 @@ impl Config {
     pub fn default_config(name: &str) -> Self {
         Config {
             name: name.to_string(),
+            root: None,
             services: HashMap::new(),
         }
     }

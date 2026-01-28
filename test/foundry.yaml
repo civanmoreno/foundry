@@ -1,9 +1,15 @@
 name: my-app
+root: ./public
 
-# Formato corto - usa defaults
-redis: 7
+php:
+  version: 8.3
+  extensions:
+    - pdo_mysql
 
-# Formato largo - personalizado
 mysql:
   version: 8.0
   port: 3306
+
+nginx:
+  version: 1.25
+  port: 80
