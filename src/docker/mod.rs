@@ -141,9 +141,20 @@ impl DockerClient {
             // Build port bindings
             let (port_bindings, exposed_ports) = self.build_port_config(service);
 
-            // Build host config with port bindings
+            // Build volume bindings if root is specified
+            let binds = if let Some(ref root_path) = service.root {
+                let cwd = std::env::current_dir()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| ".".to_string());
+                Some(vec![format!("{}:{}", cwd, root_path)])
+            } else {
+                None
+            };
+
+            // Build host config with port bindings and volumes
             let host_config = HostConfig {
                 port_bindings: Some(port_bindings),
+                binds,
                 ..Default::default()
             };
 

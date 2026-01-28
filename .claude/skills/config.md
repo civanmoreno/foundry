@@ -31,6 +31,26 @@ mysql:
     MYSQL_USER: admin
 ```
 
+## Root Path (Volume Mount)
+
+Foundry monta automáticamente el directorio del proyecto en servicios que lo necesitan:
+
+| Servicio | Root Default |
+|----------|--------------|
+| php | `/var/www/html` |
+| nginx | `/usr/share/nginx/html` |
+| node | `/app` |
+| python | `/app` |
+| ruby | `/app` |
+| golang | `/app` |
+
+Custom root:
+```yaml
+php:
+  version: 8.3
+  root: /custom/path
+```
+
 ## Imágenes Oficiales Default
 
 | Servicio | Imagen Default |

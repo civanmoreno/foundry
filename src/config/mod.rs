@@ -26,6 +26,8 @@ pub struct ServiceConfig {
     pub image: Option<String>,
     #[serde(default)]
     pub env: HashMap<String, String>,
+    #[serde(default)]
+    pub root: Option<String>,
 }
 
 /// Main configuration structure representing foundry.yaml
@@ -48,6 +50,7 @@ pub struct Service {
     pub version: String,
     pub port: Option<u16>,
     pub env: HashMap<String, String>,
+    pub root: Option<String>,
 }
 
 impl Config {
@@ -82,10 +85,10 @@ impl Config {
                 continue;
             }
 
-            let (version, port, custom_image, mut env) = match spec {
-                ServiceSpec::ShortNum(v) => (v.to_string(), None, None, HashMap::new()),
-                ServiceSpec::ShortFloat(v) => (v.to_string(), None, None, HashMap::new()),
-                ServiceSpec::ShortStr(v) => (v.clone(), None, None, HashMap::new()),
+            let (version, port, custom_image, mut env, custom_root) = match spec {
+                ServiceSpec::ShortNum(v) => (v.to_string(), None, None, HashMap::new(), None),
+                ServiceSpec::ShortFloat(v) => (v.to_string(), None, None, HashMap::new(), None),
+                ServiceSpec::ShortStr(v) => (v.clone(), None, None, HashMap::new(), None),
                 ServiceSpec::Long(config) => {
                     let ver = config
                         .version
@@ -96,7 +99,13 @@ impl Config {
                             _ => "latest".to_string(),
                         })
                         .unwrap_or_else(|| "latest".to_string());
-                    (ver, config.port, config.image.clone(), config.env.clone())
+                    (
+                        ver,
+                        config.port,
+                        config.image.clone(),
+                        config.env.clone(),
+                        config.root.clone(),
+                    )
                 }
             };
 
@@ -138,12 +147,24 @@ impl Config {
                 _ => format!("{}:{}", name, version),
             });
 
+            // Default root paths for services that need project files
+            let root = custom_root.or_else(|| match name.as_str() {
+                "php" => Some("/var/www/html".to_string()),
+                "nginx" => Some("/usr/share/nginx/html".to_string()),
+                "node" => Some("/app".to_string()),
+                "python" => Some("/app".to_string()),
+                "ruby" => Some("/app".to_string()),
+                "golang" => Some("/app".to_string()),
+                _ => None,
+            });
+
             services.push(Service {
                 name: name.clone(),
                 image,
                 version,
                 port,
                 env,
+                root,
             });
         }
 
