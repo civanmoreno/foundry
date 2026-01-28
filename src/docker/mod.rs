@@ -150,7 +150,8 @@ server {{
         let config_dir = std::env::temp_dir().join("foundry").join(project);
         std::fs::create_dir_all(&config_dir)?;
 
-        let config_path = config_dir.join("nginx.conf");
+        // Use project name for the config file
+        let config_path = config_dir.join(format!("{}.conf", project));
         let mut file = std::fs::File::create(&config_path)?;
         file.write_all(config_content.as_bytes())?;
 
@@ -300,6 +301,7 @@ server {{
             };
 
             // Add nginx config mount if this is nginx and we have the config
+            // Mount as default.conf to override nginx's built-in config
             let mut final_binds = binds.unwrap_or_default();
             if service.name == "nginx" {
                 if let Some(ref config_path) = nginx_config_path {
