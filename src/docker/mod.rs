@@ -4,10 +4,12 @@ use bollard::container::{
     StartContainerOptions, StopContainerOptions,
 };
 use bollard::image::CreateImageOptions;
-use bollard::models::HostConfig;
+use bollard::models::{EndpointSettings, HostConfig};
+use bollard::network::CreateNetworkOptions;
 use futures::StreamExt;
 use std::collections::HashMap;
 use std::default::Default;
+use std::io::Write;
 
 use crate::config::{Config, Service};
 use crate::error::{FoundryError, Result};
@@ -82,13 +84,86 @@ impl DockerClient {
         self.client.ping().await.is_ok()
     }
 
+    /// Get or create network for a project
+    async fn ensure_network(&self, project: &str) -> Result<String> {
+        let network_name = format!("{}-network", project);
+
+        // Check if network exists
+        match self.client.inspect_network::<&str>(&network_name, None).await {
+            Ok(_) => return Ok(network_name),
+            Err(_) => {}
+        }
+
+        // Create the network
+        let config = CreateNetworkOptions {
+            name: network_name.clone(),
+            driver: "bridge".to_string(),
+            labels: Labels::for_service(project, "network", "development"),
+            ..Default::default()
+        };
+
+        self.client.create_network(config).await.map_err(|e| {
+            FoundryError::DockerError(format!("Failed to create network: {}", e))
+        })?;
+
+        Ok(network_name)
+    }
+
+    /// Generate nginx config for PHP-FPM integration
+    fn generate_nginx_config(&self, project: &str, nginx_root: &str, php_root: &str) -> String {
+        let php_container = format!("{}-php", project);
+        format!(
+            r#"resolver 127.0.0.11 valid=30s;
+
+server {{
+    listen 80;
+    server_name localhost;
+    root {nginx_root};
+    index index.php index.html index.htm;
+
+    location / {{
+        try_files $uri $uri/ /index.php?$query_string;
+    }}
+
+    location ~ \.php$ {{
+        set $upstream {php_container}:9000;
+        fastcgi_pass $upstream;
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME {php_root}$fastcgi_script_name;
+        include fastcgi_params;
+    }}
+
+    location ~ /\.ht {{
+        deny all;
+    }}
+}}
+"#,
+            nginx_root = nginx_root,
+            php_root = php_root,
+            php_container = php_container
+        )
+    }
+
+    /// Write nginx config to temp file and return path
+    fn write_nginx_config(&self, project: &str, nginx_root: &str, php_root: &str) -> Result<std::path::PathBuf> {
+        let config_content = self.generate_nginx_config(project, nginx_root, php_root);
+        let config_dir = std::env::temp_dir().join("foundry").join(project);
+        std::fs::create_dir_all(&config_dir)?;
+
+        let config_path = config_dir.join("nginx.conf");
+        let mut file = std::fs::File::create(&config_path)?;
+        file.write_all(config_content.as_bytes())?;
+
+        Ok(config_path)
+    }
+
     /// Start all services defined in the configuration
     pub async fn up(&self, config: &Config, service_filter: Option<&str>) -> Result<()> {
         tracing::info!("Starting services for project '{}'", config.name);
-        
+
         // Get normalized services
         let all_services = config.get_services()?;
-        
+
         // Filter services if requested
         let services_to_start: Vec<&Service> = if let Some(filter) = service_filter {
             all_services.iter().filter(|s| s.name == filter).collect()
@@ -102,6 +177,50 @@ impl DockerClient {
                 service_filter.map(|f| format!(" matching '{}'", f)).unwrap_or_default()
             )));
         }
+
+        // Check if we have both nginx and php (for auto-configuration)
+        let has_php = all_services.iter().any(|s| s.name == "php");
+        let has_nginx = all_services.iter().any(|s| s.name == "nginx");
+        let needs_network = has_php && has_nginx;
+
+        // Create network if needed for inter-container communication
+        let network_name = if needs_network {
+            Some(self.ensure_network(&config.name).await?)
+        } else {
+            None
+        };
+
+        // Generate nginx config if both nginx and php are present
+        let nginx_config_path = if has_php && has_nginx {
+            // Get the root paths for both services
+            let nginx_root = all_services
+                .iter()
+                .find(|s| s.name == "nginx")
+                .and_then(|s| s.root.as_ref())
+                .map(|s| s.as_str())
+                .unwrap_or("/usr/share/nginx/html");
+            let php_root = all_services
+                .iter()
+                .find(|s| s.name == "php")
+                .and_then(|s| s.root.as_ref())
+                .map(|s| s.as_str())
+                .unwrap_or("/var/www/html");
+            Some(self.write_nginx_config(&config.name, nginx_root, php_root)?)
+        } else {
+            None
+        };
+
+        // Sort services: nginx should start last (after php-fpm is ready)
+        let mut services_to_start = services_to_start;
+        services_to_start.sort_by(|a, b| {
+            if a.name == "nginx" {
+                std::cmp::Ordering::Greater
+            } else if b.name == "nginx" {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        });
 
         // Create and start containers
         for service in services_to_start {
@@ -159,15 +278,46 @@ impl DockerClient {
                     }
                     None => cwd.to_string_lossy().to_string(),
                 };
+
+                // Validate that root is a directory
+                let host_path_obj = std::path::Path::new(&host_path);
+                if !host_path_obj.exists() {
+                    return Err(FoundryError::ConfigNotFound(format!(
+                        "root path '{}' does not exist",
+                        host_path
+                    )));
+                }
+                if !host_path_obj.is_dir() {
+                    return Err(FoundryError::ConfigNotFound(format!(
+                        "root path '{}' must be a directory, not a file",
+                        host_path
+                    )));
+                }
+
                 Some(vec![format!("{}:{}", host_path, container_path)])
             } else {
                 None
             };
 
-            // Build host config with port bindings and volumes
+            // Add nginx config mount if this is nginx and we have the config
+            let mut final_binds = binds.unwrap_or_default();
+            if service.name == "nginx" {
+                if let Some(ref config_path) = nginx_config_path {
+                    final_binds.push(format!(
+                        "{}:/etc/nginx/conf.d/default.conf:ro",
+                        config_path.display()
+                    ));
+                }
+            }
+
+            // Build host config with port bindings, volumes, and network
             let host_config = HostConfig {
                 port_bindings: Some(port_bindings),
-                binds,
+                binds: if final_binds.is_empty() {
+                    None
+                } else {
+                    Some(final_binds)
+                },
                 ..Default::default()
             };
 
@@ -183,12 +333,27 @@ impl DockerClient {
                 platform: None,
             };
 
+            // Build network config if needed
+            let networking_config = network_name.as_ref().map(|net| {
+                let mut endpoints = HashMap::new();
+                endpoints.insert(
+                    net.clone(),
+                    EndpointSettings {
+                        ..Default::default()
+                    },
+                );
+                bollard::container::NetworkingConfig {
+                    endpoints_config: endpoints,
+                }
+            });
+
             // Build container spec
             let container_spec = bollard::container::Config {
                 image: Some(service.image.clone()),
                 labels: Some(labels),
                 exposed_ports: Some(exposed_ports),
                 host_config: Some(host_config),
+                networking_config,
                 env: if env_vars.is_empty() {
                     None
                 } else {
