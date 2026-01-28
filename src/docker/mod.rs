@@ -395,6 +395,20 @@ server {{
         Ok(())
     }
 
+    /// Get the default container port for a service
+    fn default_container_port(service_name: &str) -> Option<u16> {
+        match service_name {
+            "nginx" => Some(80),
+            "php" => Some(9000),
+            "mysql" => Some(3306),
+            "postgres" => Some(5432),
+            "redis" => Some(6379),
+            "mongodb" => Some(27017),
+            "node" => Some(3000),
+            _ => None,
+        }
+    }
+
     /// Build port configuration for a service
     fn build_port_config(
         &self,
@@ -406,13 +420,17 @@ server {{
         let mut port_bindings = HashMap::new();
         let mut exposed_ports = HashMap::new();
 
-        if let Some(port) = service.port {
-            let container_port = format!("{}/tcp", port);
+        if let Some(host_port) = service.port {
+            // Use the service's default container port, or host_port if unknown
+            let container_port_num = Self::default_container_port(&service.name)
+                .unwrap_or(host_port);
+            let container_port = format!("{}/tcp", container_port_num);
+
             port_bindings.insert(
                 container_port.clone(),
                 Some(vec![bollard::models::PortBinding {
                     host_ip: Some("0.0.0.0".to_string()),
-                    host_port: Some(port.to_string()),
+                    host_port: Some(host_port.to_string()),
                 }]),
             );
             exposed_ports.insert(container_port, HashMap::new());
