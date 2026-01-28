@@ -28,6 +28,8 @@ pub struct ServiceConfig {
     pub env: HashMap<String, String>,
     #[serde(default)]
     pub root: Option<String>,
+    #[serde(default)]
+    pub extensions: Vec<String>,
 }
 
 /// Main configuration structure representing foundry.yaml
@@ -55,6 +57,7 @@ pub struct Service {
     pub port: Option<u16>,
     pub env: HashMap<String, String>,
     pub root: Option<String>,
+    pub extensions: Vec<String>,
 }
 
 impl Config {
@@ -89,10 +92,10 @@ impl Config {
                 continue;
             }
 
-            let (version, port, custom_image, mut env, custom_root) = match spec {
-                ServiceSpec::ShortNum(v) => (v.to_string(), None, None, HashMap::new(), None),
-                ServiceSpec::ShortFloat(v) => (v.to_string(), None, None, HashMap::new(), None),
-                ServiceSpec::ShortStr(v) => (v.clone(), None, None, HashMap::new(), None),
+            let (version, port, custom_image, mut env, custom_root, extensions) = match spec {
+                ServiceSpec::ShortNum(v) => (v.to_string(), None, None, HashMap::new(), None, Vec::new()),
+                ServiceSpec::ShortFloat(v) => (v.to_string(), None, None, HashMap::new(), None, Vec::new()),
+                ServiceSpec::ShortStr(v) => (v.clone(), None, None, HashMap::new(), None, Vec::new()),
                 ServiceSpec::Long(config) => {
                     let ver = config
                         .version
@@ -109,6 +112,7 @@ impl Config {
                         config.image.clone(),
                         config.env.clone(),
                         config.root.clone(),
+                        config.extensions.clone(),
                     )
                 }
             };
@@ -169,6 +173,7 @@ impl Config {
                 port,
                 env,
                 root,
+                extensions,
             });
         }
 

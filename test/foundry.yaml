@@ -1,7 +1,10 @@
 name: my-app
 root: ./public
 
-php: 8.3
+php:
+  version: 8.3
+  extensions:
+    - pdo_mysql
 
 mysql:
   version: 8.0

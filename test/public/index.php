@@ -1,1 +1,1 @@
-<?php echo 'Hello Foundry\!';
+<?php echo 'Hello Foundry!';

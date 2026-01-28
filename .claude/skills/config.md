@@ -31,6 +31,31 @@ mysql:
     MYSQL_USER: admin
 ```
 
+## PHP Extensions
+
+Foundry construye automáticamente una imagen custom de PHP cuando se especifican extensiones:
+
+```yaml
+php:
+  version: 8.3
+  extensions:
+    - pdo_mysql
+    - redis
+    - gd
+```
+
+### Extensiones Built-in (docker-php-ext-install)
+- `pdo_mysql`, `pdo_pgsql`, `pdo_sqlite`
+- `mysqli`, `pgsql`
+- `gd`, `intl`, `zip`, `soap`, `xsl`
+- `bcmath`, `opcache`, `pcntl`
+
+### Extensiones PECL (pecl install)
+- `redis`, `xdebug`, `imagick`
+- `memcached`, `mongodb`, `apcu`
+
+Foundry instala automáticamente las dependencias del sistema necesarias (libpng-dev, icu-dev, etc.) según las extensiones solicitadas.
+
 ## Root Path (Volume Mount)
 
 ### Global Root
@@ -122,6 +147,7 @@ pub struct ServiceConfig {
     pub image: Option<String>,
     pub env: HashMap<String, String>,
     pub root: Option<String>,    // container destination path
+    pub extensions: Vec<String>, // PHP extensions
 }
 
 pub struct Service {

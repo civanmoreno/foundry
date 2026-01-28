@@ -3,13 +3,14 @@ use bollard::container::{
     CreateContainerOptions, ListContainersOptions, RemoveContainerOptions,
     StartContainerOptions, StopContainerOptions,
 };
-use bollard::image::CreateImageOptions;
+use bollard::image::{BuildImageOptions, CreateImageOptions};
 use bollard::models::{EndpointSettings, HostConfig};
 use bollard::network::CreateNetworkOptions;
 use futures::StreamExt;
 use std::collections::HashMap;
 use std::default::Default;
 use std::io::Write;
+use tar::{Builder, Header};
 
 use crate::config::{Config, Service};
 use crate::error::{FoundryError, Result};
@@ -158,6 +159,149 @@ server {{
         Ok(config_path)
     }
 
+    /// Generate Dockerfile content for PHP with extensions
+    fn generate_php_dockerfile(&self, base_image: &str, extensions: &[String]) -> String {
+        let mut dockerfile = format!("FROM {}\n\n", base_image);
+
+        if !extensions.is_empty() {
+            // Group extensions by type for efficient installation
+            let mut pecl_extensions = Vec::new();
+            let mut builtin_extensions = Vec::new();
+
+            for ext in extensions {
+                // PECL extensions (need pecl install)
+                match ext.as_str() {
+                    "redis" | "xdebug" | "imagick" | "memcached" | "mongodb" | "apcu" => {
+                        pecl_extensions.push(ext.as_str());
+                    }
+                    // Built-in extensions (use docker-php-ext-install)
+                    _ => {
+                        builtin_extensions.push(ext.as_str());
+                    }
+                }
+            }
+
+            // Install system dependencies if needed
+            let mut sys_deps = Vec::new();
+            for ext in extensions {
+                match ext.as_str() {
+                    "gd" => sys_deps.extend(["libpng-dev", "libjpeg-turbo-dev", "freetype-dev"]),
+                    "intl" => sys_deps.push("icu-dev"),
+                    "zip" => sys_deps.extend(["libzip-dev", "zlib-dev"]),
+                    "imagick" => sys_deps.extend(["imagemagick-dev", "imagemagick"]),
+                    "pdo_pgsql" | "pgsql" => sys_deps.push("postgresql-dev"),
+                    "soap" => sys_deps.push("libxml2-dev"),
+                    "xsl" => sys_deps.push("libxslt-dev"),
+                    "memcached" => sys_deps.extend(["libmemcached-dev", "zlib-dev"]),
+                    _ => {}
+                }
+            }
+
+            if !sys_deps.is_empty() {
+                sys_deps.sort();
+                sys_deps.dedup();
+                dockerfile.push_str(&format!(
+                    "RUN apk add --no-cache {}\n\n",
+                    sys_deps.join(" ")
+                ));
+            }
+
+            // Configure and install built-in extensions
+            for ext in &builtin_extensions {
+                // Some extensions need configuration before install
+                match *ext {
+                    "gd" => {
+                        dockerfile.push_str("RUN docker-php-ext-configure gd --with-freetype --with-jpeg\n");
+                    }
+                    _ => {}
+                }
+            }
+
+            if !builtin_extensions.is_empty() {
+                dockerfile.push_str(&format!(
+                    "RUN docker-php-ext-install {}\n",
+                    builtin_extensions.join(" ")
+                ));
+            }
+
+            // Install PECL extensions
+            if !pecl_extensions.is_empty() {
+                // Need build tools for PECL
+                dockerfile.push_str("\nRUN apk add --no-cache --virtual .build-deps $PHPIZE_DEPS \\\n");
+                for ext in &pecl_extensions {
+                    dockerfile.push_str(&format!("    && pecl install {} \\\n", ext));
+                    dockerfile.push_str(&format!("    && docker-php-ext-enable {} \\\n", ext));
+                }
+                dockerfile.push_str("    && apk del .build-deps\n");
+            }
+        }
+
+        dockerfile
+    }
+
+    /// Build a custom PHP image with extensions
+    async fn build_php_image(&self, project: &str, base_image: &str, extensions: &[String]) -> Result<String> {
+        let image_tag = format!("foundry/{}-php:custom", project);
+
+        // Check if image already exists with same extensions
+        // For simplicity, we rebuild each time (could optimize with labels later)
+
+        println!("  Building PHP image with extensions: {:?}", extensions);
+
+        let dockerfile_content = self.generate_php_dockerfile(base_image, extensions);
+
+        // Create tar archive in memory
+        let mut tar_data = Vec::new();
+        {
+            let mut builder = Builder::new(&mut tar_data);
+
+            // Add Dockerfile to tar
+            let dockerfile_bytes = dockerfile_content.as_bytes();
+            let mut header = Header::new_gnu();
+            header.set_size(dockerfile_bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+
+            builder.append_data(&mut header, "Dockerfile", dockerfile_bytes)?;
+            builder.finish()?;
+        }
+
+        // Build the image
+        let build_options = BuildImageOptions {
+            t: image_tag.clone(),
+            rm: true,
+            ..Default::default()
+        };
+
+        let mut stream = self.client.build_image(build_options, None, Some(tar_data.into()));
+
+        while let Some(result) = stream.next().await {
+            match result {
+                Ok(info) => {
+                    // Print build progress
+                    if let Some(stream) = info.stream {
+                        print!("{}", stream);
+                    }
+                    if let Some(error) = info.error {
+                        return Err(FoundryError::DockerError(format!(
+                            "Build error: {}",
+                            error
+                        )));
+                    }
+                }
+                Err(e) => {
+                    return Err(FoundryError::DockerError(format!(
+                        "Failed to build image: {}",
+                        e
+                    )));
+                }
+            }
+        }
+
+        println!("  ✓ Built {}", image_tag);
+        Ok(image_tag)
+    }
+
     /// Start all services defined in the configuration
     pub async fn up(&self, config: &Config, service_filter: Option<&str>) -> Result<()> {
         tracing::info!("Starting services for project '{}'", config.name);
@@ -251,10 +395,17 @@ server {{
             // Container doesn't exist, create it
             println!("Starting {}...", service.name);
 
-            // Pull image if not exists
-            if !self.image_exists(&service.image).await {
-                self.pull_image(&service.image).await?;
-            }
+            // Determine the image to use
+            let image_to_use = if service.name == "php" && !service.extensions.is_empty() {
+                // Build custom PHP image with extensions
+                self.build_php_image(&config.name, &service.image, &service.extensions).await?
+            } else {
+                // Pull image if not exists
+                if !self.image_exists(&service.image).await {
+                    self.pull_image(&service.image).await?;
+                }
+                service.image.clone()
+            };
 
             let labels = Labels::for_service(&config.name, &service.name, "development");
 
@@ -351,7 +502,7 @@ server {{
 
             // Build container spec
             let container_spec = bollard::container::Config {
-                image: Some(service.image.clone()),
+                image: Some(image_to_use),
                 labels: Some(labels),
                 exposed_ports: Some(exposed_ports),
                 host_config: Some(host_config),
