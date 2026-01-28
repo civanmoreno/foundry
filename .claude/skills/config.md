@@ -31,16 +31,20 @@ mysql:
     MYSQL_USER: admin
 ```
 
-## Imágenes Default
+## Imágenes Oficiales Default
 
 | Servicio | Imagen Default |
 |----------|----------------|
 | node | `node:{version}-alpine` |
 | redis | `redis:{version}-alpine` |
-| php | `serversideup/php:{version}-fpm` |
+| php | `php:{version}-fpm-alpine` |
 | mysql | `mysql:{version}` |
-| postgres | `postgres:{version}` |
+| postgres | `postgres:{version}-alpine` |
 | mongodb | `mongo:{version}` |
+| nginx | `nginx:{version}-alpine` |
+| python | `python:{version}-slim` |
+| ruby | `ruby:{version}-slim` |
+| golang | `golang:{version}-alpine` |
 
 ## Env Vars Default
 

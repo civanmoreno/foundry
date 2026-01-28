@@ -10,6 +10,7 @@ use crate::error::{FoundryError, Result};
 pub enum ServiceSpec {
     // Short format: just a version string or number
     ShortNum(u32),
+    ShortFloat(f64),
     ShortStr(String),
     // Long format: with additional configuration
     Long(ServiceConfig),
@@ -83,6 +84,7 @@ impl Config {
 
             let (version, port, custom_image, mut env) = match spec {
                 ServiceSpec::ShortNum(v) => (v.to_string(), None, None, HashMap::new()),
+                ServiceSpec::ShortFloat(v) => (v.to_string(), None, None, HashMap::new()),
                 ServiceSpec::ShortStr(v) => (v.clone(), None, None, HashMap::new()),
                 ServiceSpec::Long(config) => {
                     let ver = config
@@ -121,14 +123,18 @@ impl Config {
                 _ => {}
             }
 
-            // Map service names to default Docker images
+            // Map service names to default Docker images (official images)
             let image = custom_image.unwrap_or_else(|| match name.as_str() {
                 "node" => format!("node:{}-alpine", version),
                 "redis" => format!("redis:{}-alpine", version),
-                "php" => format!("serversideup/php:{}-fpm", version),
+                "php" => format!("php:{}-fpm-alpine", version),
                 "mysql" => format!("mysql:{}", version),
-                "postgres" => format!("postgres:{}", version),
+                "postgres" => format!("postgres:{}-alpine", version),
                 "mongodb" => format!("mongo:{}", version),
+                "nginx" => format!("nginx:{}-alpine", version),
+                "python" => format!("python:{}-slim", version),
+                "ruby" => format!("ruby:{}-slim", version),
+                "golang" => format!("golang:{}-alpine", version),
                 _ => format!("{}:{}", name, version),
             });
 
